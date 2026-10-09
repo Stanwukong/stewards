@@ -66,8 +66,17 @@ function defaultValues(): BotFormInput {
   return { name: "", avatar: nanoid(), job: "", instructions: "" }
 }
 
-function BotDialog({ trigger }: { trigger: React.ReactElement }) {
-  const [open, setOpen] = React.useState(false)
+function BotDialog({
+  trigger,
+  open: openProp,
+  onOpenChange,
+}: {
+  trigger?: React.ReactElement
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+}) {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const open = openProp ?? uncontrolledOpen
   const form = useForm<BotFormInput, unknown, BotFormOutput>({
     resolver: zodResolver(insertBotSchema),
     defaultValues: defaultValues(),
@@ -78,7 +87,8 @@ function BotDialog({ trigger }: { trigger: React.ReactElement }) {
   const selectedPreset = presets.find((preset) => preset.job === job)
 
   function handleOpenChange(nextOpen: boolean) {
-    setOpen(nextOpen)
+    setUncontrolledOpen(nextOpen)
+    onOpenChange?.(nextOpen)
     if (!nextOpen) {
       form.reset(defaultValues())
     }
@@ -110,7 +120,7 @@ function BotDialog({ trigger }: { trigger: React.ReactElement }) {
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger render={trigger} />
+      {trigger && <DialogTrigger render={trigger} />}
       <DialogContent className="sm:max-w-lg">
         <form
           onSubmit={form.handleSubmit(onSubmit)}
