@@ -56,3 +56,35 @@ export async function ensureDesktop(sandbox: Sandbox) {
   await sandbox.computerUse.start()
   desktops.add(sandbox.id)
 }
+
+// noVNC, the browser VNC client the default image serves alongside the desktop
+const NOVNC_PORT = 6080
+
+// A URL the browser can embed to watch and drive the sandbox's desktop, and
+// the desktop's resolution so it can be scaled to fit. The token rides in the
+// URL because an iframe can't send preview headers.
+export async function getDesktopUrl(sandboxId: string) {
+  const sandbox = await getRunningSandbox(sandboxId)
+
+  // Another process (the agent's Trigger.dev run) may have started the
+  // desktop already, so ask the sandbox rather than trusting `desktops`
+  const { status } = await sandbox.computerUse.getStatus()
+  if (status !== "active") await sandbox.computerUse.start()
+  desktops.add(sandbox.id)
+
+  // noVNC reconnects with the same token, so it has to outlive a long session
+  const preview = await sandbox.getSignedPreviewUrl(NOVNC_PORT, 60 * 60 * 24)
+  const url = new URL("vnc.html", preview.url)
+  url.searchParams.set("autoconnect", "true")
+  url.searchParams.set("reconnect", "true")
+  url.searchParams.set("resize", "scale")
+
+  const { displays } = await sandbox.computerUse.display.getInfo()
+  const display = displays?.find((d) => d.isActive) ?? displays?.[0]
+
+  return {
+    url: url.toString(),
+    width: display?.width ?? 1024,
+    height: display?.height ?? 768,
+  }
+}

@@ -8,6 +8,8 @@ import {
   type ChatStartSessionParams,
 } from "@trigger.dev/sdk/ai"
 
+import { getDesktopUrl } from "@/lib/daytona"
+import { db } from "@/lib/db"
 import { getChat } from "@/queries/chats"
 import type { BotChatUIMessage, botChat } from "@/trigger/chat"
 
@@ -46,4 +48,18 @@ export async function loadTranscript(params: ChatLoadTranscriptParams) {
     ...transcript,
     messages: transcript.messages as BotChatUIMessage[],
   }
+}
+
+// The desktop of the chat's bot, for the computer panel
+export async function getComputerUrl(chatId: string) {
+  const chat = await getChat(chatId)
+  if (!chat) throw new Error("Chat not found")
+
+  const bot = await db.query.bots.findFirst({
+    where: (bots, { eq }) => eq(bots.id, chat.bot.id),
+    columns: { sandboxId: true },
+  })
+  if (!bot) throw new Error("Bot not found")
+
+  return getDesktopUrl(bot.sandboxId)
 }
