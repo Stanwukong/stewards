@@ -14,7 +14,7 @@
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.79",
+    "@ai-sdk/google": "^4.0.97",
     "@ai-sdk/react": "^4.0.143",
     "@base-ui/react": "^1.9.0",
     "@clerk/nextjs": "^7.9.13",

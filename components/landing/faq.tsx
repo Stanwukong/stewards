@@ -39,7 +39,7 @@ const questions = [
   {
     question: "What powers it?",
     answer:
-      "Stewards think with Claude, Anthropic's model, and each one's computer is a sandbox on Daytona.",
+      "Stewards think with Gemini 3.8 Flash, Google's model, and each one's computer is a sandbox on Daytona.",
   },
 ]
 

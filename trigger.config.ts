@@ -21,7 +21,7 @@ export default defineConfig({
   },
   dirs: ["trigger"],
   build: {
-    // Copies the Vercel project's env vars (DATABASE_URL, ANTHROPIC_API_KEY, ...)
+    // Copies the Vercel project's env vars (DATABASE_URL, GEMINI_API_KEY, ...)
     // into Trigger.dev on deploy. Reads VERCEL_ACCESS_TOKEN and VERCEL_PROJECT_ID.
     extensions: [syncVercelEnvVars()],
   },

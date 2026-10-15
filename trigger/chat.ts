@@ -1,4 +1,4 @@
-import { anthropic } from "@ai-sdk/anthropic"
+import { createGoogle } from "@ai-sdk/google"
 import { DaytonaError } from "@daytona/sdk"
 import { chat } from "@trigger.dev/sdk/ai"
 import {
@@ -29,6 +29,10 @@ export type BotChatUIMessage = UIMessage<
   UIDataTypes,
   InferUITools<ComputerTools & HandoffTools>
 >
+
+// The provider reads GOOGLE_GENERATIVE_AI_API_KEY by default; the key lives in
+// GEMINI_API_KEY, the name Google's own tooling uses
+const google = createGoogle({ apiKey: process.env.GEMINI_API_KEY })
 
 type ChatBot = Pick<Bot, "id" | "name" | "job" | "instructions">
 type Member = Pick<Bot, "id" | "name" | "job">
@@ -193,9 +197,6 @@ export const botChat = chat
   })
   .agent({
     id: "bot-chat",
-    // The prompt only changes when the bot is edited or another bot answers,
-    // so cache it across turns
-    cacheControl: { type: "ephemeral" },
     // Each turn's tools work the computer that belongs to the answering bot
     tools: async ({ chatId, clientData }) => {
       const { bot, kind, members } = await getChatContext(
@@ -233,7 +234,9 @@ export const botChat = chat
     },
     run: async ({ messages, tools, signal, streamText }) => {
       return streamText({
-        model: anthropic("claude-sonnet-5-5"),
+        // Gemini 3.x rejects sampling settings (temperature, topP, topK), so
+        // leave them unset. Thinking runs at the default "medium" level.
+        model: google("gemini-3.8-flash"),
         messages,
         tools,
         stopWhen: [
