@@ -2,8 +2,8 @@ import { auth } from "@clerk/nextjs/server"
 
 import { db } from "@/lib/db"
 
-// One of the signed-in user's chats with the bot that represents it, or null
-// when it doesn't exist or belongs to someone else
+// One of the signed-in user's chats with its bots in the order they joined, or
+// null when it doesn't exist or belongs to someone else
 export async function getChat(chatId: string) {
   const { userId } = await auth.protect()
 
@@ -11,10 +11,8 @@ export async function getChat(chatId: string) {
     where: (chats, { and, eq }) =>
       and(eq(chats.id, chatId), eq(chats.userId, userId)),
     with: {
-      // Direct chats have one bot; group chats fall back to the first to join
       members: {
         orderBy: (members, { asc }) => [asc(members.joinedAt)],
-        limit: 1,
         with: {
           bot: {
             columns: {
@@ -33,9 +31,16 @@ export async function getChat(chatId: string) {
   if (!row) return null
 
   const { members, ...chat } = row
-  const bot = members[0]?.bot
+  const bots = members.map((member) => member.bot)
   // A chat whose bots were all deleted has nothing to show
-  return bot ? { ...chat, bot } : null
+  if (bots.length === 0) return null
+
+  return { ...chat, bots, title: chatTitle(chat.name, bots) }
 }
 
-export type ChatWithBot = NonNullable<Awaited<ReturnType<typeof getChat>>>
+export type ChatWithBots = NonNullable<Awaited<ReturnType<typeof getChat>>>
+
+// Direct chats go by their bot's name; an unnamed group by its members'
+export function chatTitle(name: string | null, bots: { name: string }[]) {
+  return name ?? bots.map((bot) => bot.name).join(", ")
+}

@@ -1,12 +1,25 @@
 import { anthropic } from "@ai-sdk/anthropic"
-import { chat, type InferChatUIMessageFromTools } from "@trigger.dev/sdk/ai"
-import { isStepCount } from "ai"
+import { chat } from "@trigger.dev/sdk/ai"
+import {
+  isStepCount,
+  type InferUITools,
+  type UIDataTypes,
+  type UIMessage,
+} from "ai"
+import { z } from "zod"
 
 import { db } from "@/lib/db"
 import type { Bot, Chat } from "@/lib/db/schema"
 import { createComputerTools, type ComputerTools } from "@/trigger/tools"
 
-export type BotChatUIMessage = InferChatUIMessageFromTools<ComputerTools>
+// Each reply carries the bot that wrote it, so group chats can show who spoke
+type BotChatMetadata = { botId?: string }
+
+export type BotChatUIMessage = UIMessage<
+  BotChatMetadata,
+  UIDataTypes,
+  InferUITools<ComputerTools>
+>
 
 type ChatBot = Pick<Bot, "name" | "job" | "instructions">
 
@@ -16,7 +29,7 @@ function systemPromptFor(bot: ChatBot, kind: Chat["kind"]) {
   const setting =
     kind === "direct"
       ? "This is a one-on-one chat with the person who created you. Everything they write is addressed to you."
-      : "This is a group chat set up by the person who created you. Other bots may be members too, so not every message is addressed to you."
+      : "This is a group chat set up by the person who created you. Other bots are members too, and the person picks which bot answers each message; this one is for you. Earlier replies in the conversation may have been written by other bots, not you."
 
   return [
     `# Who you are
@@ -51,16 +64,27 @@ ${bot.instructions}`,
     .join("\n\n")
 }
 
-// The bot that represents a chat. The server actions have already checked the
-// chat belongs to the signed-in user, so this runs without Clerk.
-async function getChatContext(chatId: string) {
+// The bot answering this turn: the one picked in the composer, or the chat's
+// first bot when none was. The server actions have already checked the chat
+// belongs to the signed-in user, so this runs without Clerk. The pick comes
+// from the browser, so it only counts when that bot is a member of the chat.
+async function getChatContext(chatId: string, botId: string | undefined) {
   const member = await db.query.chatMembers.findFirst({
-    where: (members, { eq }) => eq(members.chatId, chatId),
-    // Direct chats have one bot; group chats fall back to the first to join
+    where: (members, { and, eq }) =>
+      and(
+        eq(members.chatId, chatId),
+        botId ? eq(members.botId, botId) : undefined
+      ),
     orderBy: (members, { asc }) => [asc(members.joinedAt)],
     with: {
       bot: {
-        columns: { name: true, job: true, instructions: true, sandboxId: true },
+        columns: {
+          id: true,
+          name: true,
+          job: true,
+          instructions: true,
+          sandboxId: true,
+        },
       },
       chat: { columns: { kind: true } },
     },
@@ -70,32 +94,41 @@ async function getChatContext(chatId: string) {
 }
 
 // Conversations persist in the default transcript storage, keyed by chatId
-export const botChat = chat.withUIMessage<BotChatUIMessage>().agent({
-  id: "bot-chat",
-  // The prompt only changes when the bot is edited, so cache it across turns
-  cacheControl: { type: "ephemeral" },
-  // Each turn's tools work the computer that belongs to the chat's bot
-  tools: async ({ chatId }) => {
-    const { bot } = await getChatContext(chatId)
-    return createComputerTools(bot.sandboxId)
-  },
-  // Rebuilt every turn, including continuation runs, so edits to the bot apply
-  // from the next message
-  onTurnStart: async ({ chatId }) => {
-    const {
-      bot,
-      chat: { kind },
-    } = await getChatContext(chatId)
-    chat.prompt.set(systemPromptFor(bot, kind))
-  },
-  run: async ({ messages, tools, signal, streamText }) => {
-    return streamText({
-      model: anthropic("claude-sonnet-5-5"),
-      messages,
-      tools,
-      // Working a desktop takes many look-act-look steps
-      stopWhen: isStepCount(50),
-      abortSignal: signal,
-    })
-  },
-})
+export const botChat = chat
+  .withUIMessage<BotChatUIMessage>()
+  // Which bot the person is talking to, sent with every message
+  .withClientData({ schema: z.object({ botId: z.string().optional() }) })
+  .agent({
+    id: "bot-chat",
+    // The prompt only changes when the bot is edited or another bot answers,
+    // so cache it across turns
+    cacheControl: { type: "ephemeral" },
+    // Each turn's tools work the computer that belongs to the answering bot
+    tools: async ({ chatId, clientData }) => {
+      const { bot } = await getChatContext(chatId, clientData?.botId)
+      return createComputerTools(bot.sandboxId)
+    },
+    // Rebuilt every turn, including continuation runs, so edits to the bot and
+    // switching bots apply from the next message
+    onTurnStart: async ({ chatId, clientData }) => {
+      const {
+        bot,
+        chat: { kind },
+      } = await getChatContext(chatId, clientData?.botId)
+      chat.prompt.set(systemPromptFor(bot, kind))
+      chat.setUIMessageStreamOptions({
+        messageMetadata: ({ part }) =>
+          part.type === "start" ? { botId: bot.id } : undefined,
+      })
+    },
+    run: async ({ messages, tools, signal, streamText }) => {
+      return streamText({
+        model: anthropic("claude-sonnet-5-5"),
+        messages,
+        tools,
+        // Working a desktop takes many look-act-look steps
+        stopWhen: isStepCount(50),
+        abortSignal: signal,
+      })
+    },
+  })

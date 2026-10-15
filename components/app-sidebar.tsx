@@ -8,7 +8,8 @@ import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
 
 import { BotDialog } from "@/components/bot-dialog"
-import { ChatAvatar } from "@/components/chat-avatar"
+import { GroupChatAvatar } from "@/components/group-chat-avatar"
+import { GroupChatDialog } from "@/components/group-chat-dialog"
 import { Button } from "@/components/ui/button"
 import {
   Command,
@@ -39,10 +40,17 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
-import type { ChatListItem } from "@/queries/bots"
+import type { BotListItem, ChatListItem } from "@/queries/bots"
 
-export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
+export function AppSidebar({
+  chats,
+  bots,
+}: {
+  chats: ChatListItem[]
+  bots: BotListItem[]
+}) {
   const [botDialogOpen, setBotDialogOpen] = React.useState(false)
+  const [groupChatDialogOpen, setGroupChatDialogOpen] = React.useState(false)
   const [searchOpen, setSearchOpen] = React.useState(false)
   const pathname = usePathname()
   const router = useRouter()
@@ -90,7 +98,7 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
                   <PlusIcon />
                   Create new bot
                 </DropdownMenuItem>
-                <DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setGroupChatDialogOpen(true)}>
                   <UsersIcon />
                   Create group chat
                 </DropdownMenuItem>
@@ -122,6 +130,11 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
           <span className="sr-only">Search</span>
         </Button>
         <BotDialog open={botDialogOpen} onOpenChange={setBotDialogOpen} />
+        <GroupChatDialog
+          bots={bots}
+          open={groupChatDialogOpen}
+          onOpenChange={setGroupChatDialogOpen}
+        />
         <CommandDialog
           open={searchOpen}
           onOpenChange={setSearchOpen}
@@ -133,24 +146,23 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
             <CommandList>
               <CommandEmpty>No chats found.</CommandEmpty>
               <CommandGroup heading="Chats">
-                {chats.map((chat) => {
-                  const name = chat.name ?? chat.bot.name
-
-                  return (
-                    <CommandItem
-                      key={chat.id}
-                      value={chat.id}
-                      keywords={[name, chat.bot.job]}
-                      onSelect={() => {
-                        router.push(`/chats/${chat.id}`)
-                        setSearchOpen(false)
-                      }}
-                    >
-                      <ChatAvatar seed={chat.bot.avatar} className="size-6" />
-                      <span className="truncate">{name}</span>
-                    </CommandItem>
-                  )
-                })}
+                {chats.map((chat) => (
+                  <CommandItem
+                    key={chat.id}
+                    value={chat.id}
+                    keywords={[
+                      chat.title,
+                      ...chat.bots.flatMap((bot) => [bot.name, bot.job]),
+                    ]}
+                    onSelect={() => {
+                      router.push(`/chats/${chat.id}`)
+                      setSearchOpen(false)
+                    }}
+                  >
+                    <GroupChatAvatar bots={chat.bots} className="size-6" />
+                    <span className="truncate">{chat.title}</span>
+                  </CommandItem>
+                ))}
               </CommandGroup>
             </CommandList>
           </Command>
@@ -169,7 +181,7 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
                     <SidebarMenuButton
                       size="lg"
                       isActive={isActive}
-                      tooltip={chat.name ?? chat.bot.name}
+                      tooltip={chat.title}
                       render={
                         <Link
                           href={href}
@@ -178,14 +190,14 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
                       }
                       className="group-data-[collapsible=icon]:p-1!"
                     >
-                      <ChatAvatar
-                        seed={chat.bot.avatar}
+                      <GroupChatAvatar
+                        bots={chat.bots}
                         className="group-data-[collapsible=icon]:size-6"
                       />
                       <div className="grid flex-1 leading-tight">
                         <div className="flex items-baseline justify-between gap-2">
                           <span className="truncate font-medium">
-                            {chat.name ?? chat.bot.name}
+                            {chat.title}
                           </span>
                           {/* Relative time can tick over between server render and hydration */}
                           <time
@@ -197,7 +209,10 @@ export function AppSidebar({ chats }: { chats: ChatListItem[] }) {
                           </time>
                         </div>
                         <span className="truncate text-xs text-muted-foreground">
-                          {chat.lastMessagePreview ?? chat.bot.job}
+                          {chat.lastMessagePreview ??
+                            (chat.kind === "direct"
+                              ? chat.bots[0].job
+                              : chat.bots.map((bot) => bot.name).join(", "))}
                         </span>
                       </div>
                     </SidebarMenuButton>

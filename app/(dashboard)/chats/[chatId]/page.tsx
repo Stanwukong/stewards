@@ -27,23 +27,32 @@ export default async function Page(props: PageProps<"/chats/[chatId]">) {
         }
       : undefined
 
+  const conversation = (
+    <div className="flex h-full flex-col">
+      <ChatHeader chat={chat} />
+      <Chat
+        key={chat.id}
+        id={chat.id}
+        bots={chat.bots}
+        group={chat.kind === "group"}
+        initialMessages={messages}
+        session={session}
+      />
+    </div>
+  )
+
+  // Group chats have no single computer to show beside them
+  if (chat.kind === "group") {
+    return <div className="h-svh">{conversation}</div>
+  }
+
   return (
     <ComputerPanelProvider key={chat.id} chatId={chat.id}>
       {/* The group sets an inline height: 100%, so the viewport height has to
           come from a parent for the chat to scroll inside it */}
       <div className="h-svh">
         <ResizablePanelGroup orientation="horizontal">
-          <ResizablePanel minSize="30%">
-            <div className="flex h-full flex-col">
-              <ChatHeader chat={chat} />
-              <Chat
-                key={chat.id}
-                id={chat.id}
-                initialMessages={messages}
-                session={session}
-              />
-            </div>
-          </ResizablePanel>
+          <ResizablePanel minSize="30%">{conversation}</ResizablePanel>
           <ComputerPanel />
         </ResizablePanelGroup>
       </div>
