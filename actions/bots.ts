@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache"
 import { redirect, RedirectType } from "next/navigation"
 import { z } from "zod"
 
+import { createBotSandbox, deleteBotSandbox } from "@/lib/daytona"
 import { db } from "@/lib/db"
 import {
   bots,
@@ -29,26 +30,45 @@ export async function createBot(
     return { success: false, error: z.prettifyError(parsed.error) }
   }
 
+  let sandboxId: string
+  try {
+    sandboxId = await createBotSandbox(userId)
+  } catch (error) {
+    console.error("Failed to create bot sandbox", error)
+    return { success: false, error: "Couldn't set up your bot. Try again." }
+  }
+
   // Every bot starts with a direct chat, so create all three rows or none
-  const { bot, chat } = await db.transaction(async (tx) => {
-    const [bot] = await tx
-      .insert(bots)
-      .values({
-        ...parsed.data,
-        instructions: parsed.data.instructions || null,
-        userId,
-      })
-      .returning()
+  let result: { bot: Bot; chat: Chat }
+  try {
+    result = await db.transaction(async (tx) => {
+      const [bot] = await tx
+        .insert(bots)
+        .values({
+          ...parsed.data,
+          instructions: parsed.data.instructions || null,
+          userId,
+          sandboxId,
+        })
+        .returning()
 
-    const [chat] = await tx
-      .insert(chats)
-      .values({ userId, kind: "direct" })
-      .returning()
+      const [chat] = await tx
+        .insert(chats)
+        .values({ userId, kind: "direct" })
+        .returning()
 
-    await tx.insert(chatMembers).values({ chatId: chat.id, botId: bot.id })
+      await tx.insert(chatMembers).values({ chatId: chat.id, botId: bot.id })
 
-    return { bot, chat }
-  })
+      return { bot, chat }
+    })
+  } catch (error) {
+    // No bot owns the sandbox now, so don't leave it running up a bill
+    await deleteBotSandbox(sandboxId).catch((cleanupError) =>
+      console.error("Failed to delete orphaned sandbox", cleanupError)
+    )
+    throw error
+  }
+  const { bot, chat } = result
 
   revalidatePath("/")
 
@@ -129,6 +149,13 @@ export async function deleteBot(botId: string): Promise<DeleteBotResult> {
 
   if (!bot) {
     return { success: false, error: "That bot doesn't exist." }
+  }
+
+  // The bot is already gone, so a failure here only orphans the sandbox
+  try {
+    await deleteBotSandbox(bot.sandboxId)
+  } catch (error) {
+    console.error(`Failed to delete sandbox ${bot.sandboxId}`, error)
   }
 
   revalidatePath("/", "layout")

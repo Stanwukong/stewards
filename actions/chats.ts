@@ -9,7 +9,7 @@ import {
 } from "@trigger.dev/sdk/ai"
 
 import { getChat } from "@/queries/chats"
-import type { botChat } from "@/trigger/chat"
+import type { BotChatUIMessage, botChat } from "@/trigger/chat"
 
 // chatId comes from the browser, so every action checks it belongs to the
 // signed-in user before touching the session
@@ -40,5 +40,10 @@ const load = chat.createLoadTranscriptAction(defaultStorage)
 
 export async function loadTranscript(params: ChatLoadTranscriptParams) {
   await assertOwnsChat(params.chatId)
-  return load(params)
+  const transcript = await load(params)
+  // Storage is untyped, but everything in it was written by botChat
+  return {
+    ...transcript,
+    messages: transcript.messages as BotChatUIMessage[],
+  }
 }
