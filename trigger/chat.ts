@@ -1,4 +1,5 @@
 import { anthropic } from "@ai-sdk/anthropic"
+import { DaytonaError } from "@daytona/sdk"
 import { chat } from "@trigger.dev/sdk/ai"
 import {
   hasToolCall,
@@ -14,6 +15,7 @@ import type { Bot, Chat } from "@/lib/db/schema"
 import {
   createComputerTools,
   createHandoffTool,
+  ToolError,
   type ComputerTools,
   type HandoffTools,
 } from "@/trigger/tools"
@@ -122,6 +124,19 @@ ${bot.instructions}`,
     .join("\n\n")
 }
 
+// What the chat shows, and saves, for an error. The default turns every error
+// into "An error occurred.", so on later turns the bot no longer sees why a
+// tool failed. Messages written for the bot, and Daytona's errors about its
+// own computer, are kept; anything else could carry internals (connection
+// strings, API responses, stack traces), so it stays generic.
+function chatErrorMessage(error: unknown) {
+  if (error instanceof ToolError || error instanceof DaytonaError) {
+    return error.message
+  }
+  console.error(error)
+  return "Something went wrong on our side."
+}
+
 // The bot answering this turn: the one tagged in the message, or the chat's
 // first bot when none was. The server actions have already checked the chat
 // belongs to the signed-in user, so this runs without Clerk. The tag comes
@@ -213,6 +228,7 @@ export const botChat = chat
       chat.setUIMessageStreamOptions({
         messageMetadata: ({ part }) =>
           part.type === "start" ? { botId: bot.id } : undefined,
+        onError: chatErrorMessage,
       })
     },
     run: async ({ messages, tools, signal, streamText }) => {

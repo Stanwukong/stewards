@@ -1,8 +1,12 @@
-import { DaytonaNotFoundError, type Sandbox } from "@daytona/sdk"
+import { type Sandbox } from "@daytona/sdk"
 import { tool, type ToolSet } from "ai"
 import { z } from "zod"
 
 import { ensureDesktop, getRunningSandbox, MEMORY_FILE } from "@/lib/daytona"
+
+// A failure the bot can act on, written for it to read. Its message is shown
+// as-is; other errors are masked before they reach the chat.
+export class ToolError extends Error {}
 
 // Long output would crowd the model's context, so keep the head and the tail
 const MAX_OUTPUT = 20_000
@@ -70,7 +74,7 @@ export function createComputerTools(sandboxId: string) {
       quality: 75,
       showCursor: true,
     })
-    if (!screenshot) throw new Error("The screen couldn't be captured.")
+    if (!screenshot) throw new ToolError("The screen couldn't be captured.")
     return { mediaType: "image/jpeg", base64: screenshot }
   }
 
@@ -173,16 +177,18 @@ export function createComputerTools(sandboxId: string) {
         "Read your memory: the notes you keep about the person and their work, shared across every chat you're in.",
       inputSchema: z.object({}),
       outputSchema: z.object({ content: z.string() }),
+      // Read through the shell, not fs.downloadFile: the SDK's file transfers
+      // load busboy and form-data at runtime, which the Trigger.dev bundle
+      // leaves out
       execute: async () => {
         const box = await sandbox()
-        try {
-          const content = await box.fs.downloadFile(MEMORY_FILE)
-          return { content: content.toString("utf8") }
-        } catch (error) {
-          // Nothing remembered yet
-          if (error instanceof DaytonaNotFoundError) return { content: "" }
-          throw error
-        }
+        // A missing file is nothing remembered yet, not an error
+        const { exitCode, result } = await box.process.executeCommand(
+          `sh -c 'test -e ${MEMORY_FILE} || exit 0; cat ${MEMORY_FILE}'`
+        )
+        if (exitCode !== 0)
+          throw new ToolError(`Reading memory failed: ${result}`)
+        return { content: result }
       },
     }),
 
@@ -192,13 +198,21 @@ export function createComputerTools(sandboxId: string) {
       inputSchema: z.object({
         content: z
           .string()
-          .describe("Your full memory, as a short Markdown list under headings"),
+          .describe(
+            "Your full memory, as a short Markdown list under headings"
+          ),
       }),
       outputSchema: z.object({ bytes: z.number() }),
       execute: async ({ content }) => {
         const box = await sandbox()
         const buffer = Buffer.from(content, "utf8")
-        await box.fs.uploadFile(buffer, MEMORY_FILE)
+        // Base64 has no quotes or shell metacharacters, so any memory text
+        // survives the trip into the command intact
+        const { exitCode, result } = await box.process.executeCommand(
+          `sh -c 'echo ${buffer.toString("base64")} | base64 -d > ${MEMORY_FILE}'`
+        )
+        if (exitCode !== 0)
+          throw new ToolError(`Saving memory failed: ${result}`)
         return { bytes: buffer.byteLength }
       },
     }),
@@ -340,7 +354,7 @@ export function createHandoffTool(others: { id: string; name: string }[]) {
       execute: async ({ botId, reason }) => {
         const bot = others.find((bot) => bot.id === botId)
         if (!bot) {
-          throw new Error(
+          throw new ToolError(
             `No other bot in this chat has the ID ${botId}. Pick one from the members list.`
           )
         }
