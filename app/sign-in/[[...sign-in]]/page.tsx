@@ -1,9 +1,11 @@
 import { SignIn } from "@clerk/nextjs"
 
+import { AuthShell } from "@/components/auth-shell"
+
 export default function SignInPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <SignIn />
-    </div>
+    <AuthShell>
+      <SignIn fallbackRedirectUrl="/chats" />
+    </AuthShell>
   )
 }

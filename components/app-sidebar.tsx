@@ -40,6 +40,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar"
+import { Wordmark } from "@/components/wordmark"
 import type { BotListItem, ChatListItem } from "@/queries/bots"
 
 export function AppSidebar({
@@ -84,7 +85,13 @@ export function AppSidebar({
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-2">
+          <Link
+            href="/chats"
+            className="rounded-md px-1.5 outline-none group-data-[collapsible=icon]:hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          >
+            <Wordmark className="text-base" />
+          </Link>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={<Button variant="ghost" size="icon" />}

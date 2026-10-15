@@ -158,7 +158,7 @@ export async function deleteGroupChat(
 
   revalidatePath("/", "layout")
   // The chat the group was deleted from no longer exists
-  redirect("/", RedirectType.replace)
+  redirect("/chats", RedirectType.replace)
 }
 
 // chatId comes from the browser, so every action checks it belongs to the

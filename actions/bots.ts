@@ -70,7 +70,7 @@ export async function createBot(
   }
   const { bot, chat } = result
 
-  revalidatePath("/")
+  revalidatePath("/chats")
 
   return { success: true, bot, chat }
 }
@@ -160,5 +160,5 @@ export async function deleteBot(botId: string): Promise<DeleteBotResult> {
 
   revalidatePath("/", "layout")
   // The chat the bot was deleted from no longer exists
-  redirect("/", RedirectType.replace)
+  redirect("/chats", RedirectType.replace)
 }
