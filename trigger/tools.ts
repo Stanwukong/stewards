@@ -1,8 +1,8 @@
-import type { Sandbox } from "@daytona/sdk"
+import { DaytonaNotFoundError, type Sandbox } from "@daytona/sdk"
 import { tool, type ToolSet } from "ai"
 import { z } from "zod"
 
-import { ensureDesktop, getRunningSandbox } from "@/lib/daytona"
+import { ensureDesktop, getRunningSandbox, MEMORY_FILE } from "@/lib/daytona"
 
 // Long output would crowd the model's context, so keep the head and the tail
 const MAX_OUTPUT = 20_000
@@ -168,6 +168,41 @@ export function createComputerTools(sandboxId: string) {
       },
     }),
 
+    getMemory: tool({
+      description:
+        "Read your memory: the notes you keep about the person and their work, shared across every chat you're in.",
+      inputSchema: z.object({}),
+      outputSchema: z.object({ content: z.string() }),
+      execute: async () => {
+        const box = await sandbox()
+        try {
+          const content = await box.fs.downloadFile(MEMORY_FILE)
+          return { content: content.toString("utf8") }
+        } catch (error) {
+          // Nothing remembered yet
+          if (error instanceof DaytonaNotFoundError) return { content: "" }
+          throw error
+        }
+      },
+    }),
+
+    setMemory: tool({
+      description:
+        "Replace your memory with new contents. Pass the whole memory, not just what changed, so call getMemory first and edit what it returned.",
+      inputSchema: z.object({
+        content: z
+          .string()
+          .describe("Your full memory, as a short Markdown list under headings"),
+      }),
+      outputSchema: z.object({ bytes: z.number() }),
+      execute: async ({ content }) => {
+        const box = await sandbox()
+        const buffer = Buffer.from(content, "utf8")
+        await box.fs.uploadFile(buffer, MEMORY_FILE)
+        return { bytes: buffer.byteLength }
+      },
+    }),
+
     mouseClick: tool({
       description:
         "Click the mouse at a point on the screen. Look at the screen first so you know where to click.",
@@ -279,3 +314,40 @@ export function createComputerTools(sandboxId: string) {
 }
 
 export type ComputerTools = ReturnType<typeof createComputerTools>
+
+// Passes the person's message to another bot in a group chat, which answers
+// it right after. Calling it ends the turn of the bot that called it.
+export function createHandoffTool(others: { id: string; name: string }[]) {
+  return {
+    handoff: tool({
+      description:
+        "Hand the person's latest message to another bot in this group chat whose job suits it clearly better than yours. That bot answers it straight after you, so don't answer it yourself.",
+      inputSchema: z.object({
+        botId: z
+          .string()
+          .describe("ID of the bot to hand over to, from the members list"),
+        reason: z
+          .string()
+          .describe(
+            "One short sentence, shown to the person, on why that bot suits the message better"
+          ),
+      }),
+      outputSchema: z.object({
+        botId: z.string(),
+        name: z.string(),
+        reason: z.string(),
+      }),
+      execute: async ({ botId, reason }) => {
+        const bot = others.find((bot) => bot.id === botId)
+        if (!bot) {
+          throw new Error(
+            `No other bot in this chat has the ID ${botId}. Pick one from the members list.`
+          )
+        }
+        return { botId: bot.id, name: bot.name, reason }
+      },
+    }),
+  } satisfies ToolSet
+}
+
+export type HandoffTools = ReturnType<typeof createHandoffTool>

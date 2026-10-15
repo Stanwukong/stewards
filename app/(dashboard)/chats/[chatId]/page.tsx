@@ -8,11 +8,12 @@ import {
   ComputerPanelProvider,
 } from "@/components/computer-panel"
 import { ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
+import { getBots } from "@/queries/bots"
 import { getChat } from "@/queries/chats"
 
 export default async function Page(props: PageProps<"/chats/[chatId]">) {
   const { chatId } = await props.params
-  const chat = await getChat(chatId)
+  const [chat, bots] = await Promise.all([getChat(chatId), getBots()])
 
   if (!chat) notFound()
 
@@ -29,7 +30,7 @@ export default async function Page(props: PageProps<"/chats/[chatId]">) {
 
   const conversation = (
     <div className="flex h-full flex-col">
-      <ChatHeader chat={chat} />
+      <ChatHeader chat={chat} bots={bots} />
       <Chat
         key={chat.id}
         id={chat.id}

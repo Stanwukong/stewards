@@ -3,7 +3,10 @@
 import { useChat } from "@ai-sdk/react"
 import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import { useTriggerChatTransport } from "@trigger.dev/sdk/chat/react"
+import { readUIMessageStream, type ChatStatus } from "ai"
 import {
+  ArrowRightLeftIcon,
+  BrainIcon,
   CircleAlertIcon,
   EyeIcon,
   FileIcon,
@@ -16,7 +19,13 @@ import {
   PaperclipIcon,
   ScrollIcon,
 } from "lucide-react"
-import { useState, type ReactNode } from "react"
+import {
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react"
 import { bundledLanguages, type BundledLanguage } from "shiki"
 
 import { mintChatAccessToken, startChatSession } from "@/actions/chats"
@@ -44,18 +53,16 @@ import {
   PromptInputButton,
   PromptInputFooter,
   PromptInputHeader,
-  PromptInputSelect,
-  PromptInputSelectContent,
-  PromptInputSelectItem,
-  PromptInputSelectTrigger,
-  PromptInputSelectValue,
+  PromptInputProvider,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
   usePromptInputAttachments,
+  usePromptInputController,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input"
 import { Terminal } from "@/components/ai-elements/terminal"
+import { BotBadge } from "@/components/bot-badge"
 import { ChatAvatar } from "@/components/chat-avatar"
 import {
   Tool,
@@ -67,6 +74,7 @@ import { Kbd, KbdGroup } from "@/components/ui/kbd"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
+import { findMentions, MENTION_QUERY } from "@/lib/mentions"
 import type { BotChatUIMessage, botChat } from "@/trigger/chat"
 
 type Part = BotChatUIMessage["parts"][number]
@@ -247,6 +255,22 @@ function ToolCall({ part }: { part: ToolPart }) {
         </FileCall>
       )
 
+    case "tool-getMemory":
+      return (
+        <ActionRow part={part} icon={<BrainIcon />}>
+          Checked its memory
+        </ActionRow>
+      )
+
+    case "tool-setMemory":
+      return (
+        <FileCall part={part} title="Updated its memory">
+          {part.input?.content !== undefined && (
+            <CodeBlock code={part.input.content} language="md" />
+          )}
+        </FileCall>
+      )
+
     case "tool-mouseClick":
       return (
         <ActionRow part={part} icon={<MousePointerClickIcon />}>
@@ -317,6 +341,15 @@ function ToolCall({ part }: { part: ToolPart }) {
 
     case "tool-showScreen":
       return <ShowScreenCall part={part} />
+
+    case "tool-handoff":
+      return (
+        <ActionRow part={part} icon={<ArrowRightLeftIcon />}>
+          {part.state === "output-available"
+            ? `Handed over to ${part.output.name}: ${part.output.reason}`
+            : "Handing over"}
+        </ActionRow>
+      )
   }
 }
 
@@ -327,7 +360,11 @@ const MAX_ATTACHMENTS_SIZE = 700 * 1024
 // Files the model can read
 const ACCEPTED_FILES = "image/*,application/pdf"
 
-type ChatBot = { id: string; name: string; avatar: string }
+type ChatBot = { id: string; name: string; avatar: string; job: string }
+
+function isHandoff(part: Part): part is ToolPartOf<"tool-handoff"> {
+  return part.type === "tool-handoff"
+}
 
 function ComposerAttachments() {
   const attachments = usePromptInputAttachments()
@@ -366,37 +403,210 @@ function AttachButton() {
   )
 }
 
-function BotSelect({
+// What the person wrote in a group chat, with each tagged bot as a badge. A
+// message sent without a tag went to whoever spoke last, so that bot leads it.
+function UserText({
+  text,
   bots,
-  value,
-  onValueChange,
+  botId,
+  lead,
+}: {
+  text: string
+  bots: ChatBot[]
+  botId: string | undefined
+  lead: boolean
+}) {
+  const mentions = findMentions(text, bots, botId)
+  const recipient = bots.find((bot) => bot.id === botId)
+  const untagged =
+    lead && recipient && !mentions.some((mention) => mention.bot === recipient)
+
+  const pieces: ReactNode[] = []
+  let from = 0
+  for (const mention of mentions) {
+    pieces.push(text.slice(from, mention.index))
+    pieces.push(<BotBadge key={mention.index} bot={mention.bot} />)
+    from = mention.index + mention.length
+  }
+  pieces.push(text.slice(from))
+
+  return (
+    <p className="whitespace-pre-wrap">
+      {untagged && <BotBadge bot={recipient} className="mr-1" />}
+      {pieces}
+    </p>
+  )
+}
+
+// The prompt input, plus a list of the chat's bots that opens on "@" so the
+// person can tag who the message is for
+function Composer({
+  bots,
+  defaultBot,
+  status,
+  onStop,
+  onSend,
 }: {
   bots: ChatBot[]
-  value: ChatBot
-  onValueChange: (botId: string) => void
+  // Who gets a message that tags nobody
+  defaultBot: ChatBot
+  status: ChatStatus
+  onStop: () => void
+  onSend: (message: PromptInputMessage, botId: string) => void
 }) {
+  const { textInput } = usePromptInputController()
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const listId = useId()
+  // The "@query" being typed, as a range of the text
+  const [mention, setMention] = useState<{
+    start: number
+    end: number
+    query: string
+  } | null>(null)
+  const [active, setActive] = useState(0)
+  // The last bot picked from the list, which wins when two bots share a name
+  const picked = useRef<string | undefined>(undefined)
+
+  const query = mention?.query.toLowerCase()
+  const options =
+    query === undefined
+      ? []
+      : bots.filter((bot) => bot.name.toLowerCase().includes(query))
+  const activeIndex = Math.min(active, options.length - 1)
+  const open = options.length > 0
+
+  function trackMention(textarea: HTMLTextAreaElement) {
+    const caret = textarea.selectionStart
+    const match =
+      caret === textarea.selectionEnd
+        ? MENTION_QUERY.exec(textarea.value.slice(0, caret))
+        : null
+    if (!match) {
+      setMention(null)
+      return
+    }
+    if (match[1] !== mention?.query) setActive(0)
+    setMention({
+      start: caret - match[1].length - 1,
+      end: caret,
+      query: match[1],
+    })
+  }
+
+  function pick(bot: ChatBot) {
+    if (!mention) return
+    const tag = `@${bot.name} `
+    const value = textInput.value
+    textInput.setInput(
+      value.slice(0, mention.start) + tag + value.slice(mention.end)
+    )
+    picked.current = bot.id
+    setMention(null)
+
+    // Put the caret after the tag once the new text has rendered
+    const caret = mention.start + tag.length
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+      textareaRef.current?.setSelectionRange(caret, caret)
+    })
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (!open) return
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault()
+      const step = event.key === "ArrowDown" ? 1 : -1
+      setActive((activeIndex + step + options.length) % options.length)
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      // Picking from the list takes Enter, so it doesn't send the message
+      event.preventDefault()
+      pick(options[activeIndex])
+    } else if (event.key === "Escape") {
+      event.preventDefault()
+      setMention(null)
+    }
+  }
+
+  function handleSubmit(message: PromptInputMessage) {
+    const tagged = findMentions(message.text, bots, picked.current)[0]?.bot
+    onSend(message, (tagged ?? defaultBot).id)
+    picked.current = undefined
+  }
+
   return (
-    <PromptInputSelect
-      value={value.id}
-      onValueChange={(botId) => {
-        if (typeof botId === "string") onValueChange(botId)
-      }}
-    >
-      <PromptInputSelectTrigger size="sm" aria-label="Bot to talk to">
-        <PromptInputSelectValue>
-          <ChatAvatar seed={value.avatar} className="size-4" />
-          {value.name}
-        </PromptInputSelectValue>
-      </PromptInputSelectTrigger>
-      <PromptInputSelectContent>
-        {bots.map((bot) => (
-          <PromptInputSelectItem key={bot.id} value={bot.id}>
-            <ChatAvatar seed={bot.avatar} className="size-4" />
-            {bot.name}
-          </PromptInputSelectItem>
-        ))}
-      </PromptInputSelectContent>
-    </PromptInputSelect>
+    <div className="relative">
+      {open && (
+        <div
+          id={listId}
+          role="listbox"
+          aria-label="Bots"
+          className="absolute bottom-full left-0 z-10 mb-2 w-72 max-w-full rounded-lg border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          {options.map((bot, i) => (
+            <div
+              key={bot.id}
+              id={`${listId}-${bot.id}`}
+              role="option"
+              aria-selected={i === activeIndex}
+              // Keep focus in the textarea, so typing carries on after a pick
+              onMouseDown={(event) => {
+                event.preventDefault()
+                pick(bot)
+              }}
+              onMouseMove={() => setActive(i)}
+              className="flex cursor-default items-center gap-2 rounded-md px-2 py-1.5 text-sm aria-selected:bg-accent aria-selected:text-accent-foreground"
+            >
+              <ChatAvatar seed={bot.avatar} className="size-5" />
+              <span className="max-w-32 shrink-0 truncate font-medium">
+                {bot.name}
+              </span>
+              <span className="truncate text-muted-foreground">{bot.job}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <PromptInput
+        accept={ACCEPTED_FILES}
+        multiple
+        maxFileSize={MAX_ATTACHMENTS_SIZE}
+        onError={({ message }) =>
+          toast.add({
+            title: "Couldn't attach that file",
+            description: message,
+            type: "error",
+          })
+        }
+        onSubmit={handleSubmit}
+      >
+        <ComposerAttachments />
+        <PromptInputBody>
+          <PromptInputTextarea
+            ref={textareaRef}
+            placeholder={
+              bots.length > 1
+                ? `Message ${defaultBot.name}, or type @ to tag another bot`
+                : `Message ${defaultBot.name}`
+            }
+            aria-autocomplete="list"
+            aria-expanded={open}
+            aria-controls={open ? listId : undefined}
+            aria-activedescendant={
+              open ? `${listId}-${options[activeIndex].id}` : undefined
+            }
+            onChange={(event) => trackMention(event.currentTarget)}
+            onSelect={(event) => trackMention(event.currentTarget)}
+            onBlur={() => setMention(null)}
+            onKeyDown={handleKeyDown}
+          />
+        </PromptInputBody>
+        <PromptInputFooter>
+          <PromptInputTools>
+            <AttachButton />
+          </PromptInputTools>
+          <PromptInputSubmit status={status} onStop={onStop} />
+        </PromptInputFooter>
+      </PromptInput>
+    </div>
   )
 }
 
@@ -416,27 +626,17 @@ export function Chat({
   initialMessages: BotChatUIMessage[]
   session?: ChatSessionPersistedState
 }) {
-  // Carry on with whoever answered last
-  const [botId, setBotId] = useState(
-    () =>
-      initialMessages.findLast((message) => message.metadata?.botId)?.metadata
-        ?.botId
-  )
-  // The picked bot may have left the chat since, so fall back to the first
-  const bot = bots.find((bot) => bot.id === botId) ?? bots[0]
-
   const transport = useTriggerChatTransport<typeof botChat>({
     task: "bot-chat",
     accessToken: ({ chatId }) => mintChatAccessToken(chatId),
     startSession: ({ chatId, clientData }) =>
       startChatSession({ chatId, clientData }),
     sessions: session && { [id]: session },
-    // Sent with every message, so the agent answers as the picked bot
-    clientData: { botId: bot.id },
   })
 
   const {
     messages,
+    setMessages,
     sendMessage,
     status,
     stop: stopStream,
@@ -445,7 +645,57 @@ export function Chat({
     messages: initialMessages,
     transport,
     resume: initialMessages.length > 0,
+    // A bot that handed the message over has finished, so the bot it went to
+    // answers now
+    onFinish: ({ message, isAbort, isError }) => {
+      if (isAbort || isError) return
+      const handoff = message.parts.findLast(isHandoff)
+      if (handoff?.state === "output-available") {
+        void followHandoff(handoff.output.botId)
+      }
+    },
   })
+
+  // Whether the bot handed a message is answering
+  const [handingOff, setHandingOff] = useState(false)
+
+  // The answer comes from an action, since the person sent nothing new.
+  // Through useChat it would be folded into the handoff message, so its stream
+  // is read into a message of its own here instead.
+  async function followHandoff(botId: string) {
+    setHandingOff(true)
+    try {
+      const stream = await transport.sendAction(
+        id,
+        { type: "handoff" },
+        { metadata: { botId, handoff: true } }
+      )
+      for await (const message of readUIMessageStream<BotChatUIMessage>({
+        stream,
+      })) {
+        setMessages((current) =>
+          current.at(-1)?.id === message.id
+            ? [...current.slice(0, -1), message]
+            : [...current, message]
+        )
+      }
+    } catch (error) {
+      console.error("Handoff failed", error)
+      toast.add({
+        title: "Couldn't hand the message over",
+        description: "Tag the bot and send it again.",
+        type: "error",
+      })
+    } finally {
+      setHandingOff(false)
+    }
+  }
+
+  // Carry on with whoever was talked to last. That bot may have left the chat
+  // since, so fall back to the first.
+  const lastBotId = messages.findLast((message) => message.metadata?.botId)
+    ?.metadata?.botId
+  const defaultBot = bots.find((bot) => bot.id === lastBotId) ?? bots[0]
 
   // Aborting a resumed stream doesn't reach the agent, so stop it directly too
   function stop() {
@@ -453,7 +703,7 @@ export function Chat({
     transport.stopGeneration(id)
   }
 
-  function handleSubmit({ text, files }: PromptInputMessage) {
+  function send({ text, files }: PromptInputMessage, botId: string) {
     if (!text.trim() && files.length === 0) return
 
     const size = files.reduce((total, file) => total + file.url.length, 0)
@@ -467,7 +717,9 @@ export function Chat({
       throw new Error("Attachments too large")
     }
 
-    sendMessage({ text, files })
+    // On the message so it shows who it was for, and as transport metadata
+    // so that bot answers it
+    sendMessage({ text, files, metadata: { botId } }, { metadata: { botId } })
   }
 
   return (
@@ -483,6 +735,9 @@ export function Chat({
               part.type === "file"
                 ? [{ ...part, id: `${message.id}-${i}` }]
                 : []
+            )
+            const firstText = message.parts.findIndex(
+              (part) => part.type === "text"
             )
 
             return (
@@ -505,7 +760,15 @@ export function Chat({
                 <MessageContent>
                   {message.parts.map((part, i) => {
                     if (part.type === "text") {
-                      return (
+                      return group && message.role === "user" ? (
+                        <UserText
+                          key={i}
+                          text={part.text}
+                          bots={bots}
+                          botId={message.metadata?.botId}
+                          lead={i === firstText}
+                        />
+                      ) : (
                         <MessageResponse key={i}>{part.text}</MessageResponse>
                       )
                     }
@@ -522,31 +785,15 @@ export function Chat({
         <ConversationScrollButton />
       </Conversation>
       <div className="mx-auto w-full max-w-3xl p-4 pt-0">
-        <PromptInput
-          accept={ACCEPTED_FILES}
-          multiple
-          maxFileSize={MAX_ATTACHMENTS_SIZE}
-          onError={({ message }) =>
-            toast.add({
-              title: "Couldn't attach that file",
-              description: message,
-              type: "error",
-            })
-          }
-          onSubmit={handleSubmit}
-        >
-          <ComposerAttachments />
-          <PromptInputBody>
-            <PromptInputTextarea placeholder={`Message ${bot.name}`} />
-          </PromptInputBody>
-          <PromptInputFooter>
-            <PromptInputTools>
-              <AttachButton />
-              <BotSelect bots={bots} value={bot} onValueChange={setBotId} />
-            </PromptInputTools>
-            <PromptInputSubmit status={status} onStop={stop} />
-          </PromptInputFooter>
-        </PromptInput>
+        <PromptInputProvider>
+          <Composer
+            bots={bots}
+            defaultBot={defaultBot}
+            status={handingOff ? "streaming" : status}
+            onStop={stop}
+            onSend={send}
+          />
+        </PromptInputProvider>
       </div>
     </div>
   )

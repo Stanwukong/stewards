@@ -15,9 +15,27 @@ function daytona() {
   return client
 }
 
+// The bot's memory, kept in its home directory (the sandbox's working
+// directory) so every chat the bot is in reads and writes the same notes
+export const MEMORY_FILE = "MEMORY.md"
+
 // Every bot gets its own sandbox, created alongside it
 export async function createBotSandbox(userId: string) {
   const sandbox = await daytona().create({ labels: { userId } })
+
+  try {
+    const { exitCode, result } = await sandbox.process.executeCommand(
+      `touch ${MEMORY_FILE}`
+    )
+    if (exitCode !== 0) throw new Error(`touch ${MEMORY_FILE} failed: ${result}`)
+  } catch (error) {
+    // The caller never learns this sandbox's ID, so clean it up here
+    await sandbox.delete().catch((cleanupError) =>
+      console.error("Failed to delete sandbox after setup failed", cleanupError)
+    )
+    throw error
+  }
+
   return sandbox.id
 }
 

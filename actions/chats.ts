@@ -8,8 +8,9 @@ import {
   type ChatLoadTranscriptParams,
   type ChatStartSessionParams,
 } from "@trigger.dev/sdk/ai"
-import { and, eq, inArray } from "drizzle-orm"
+import { and, eq, inArray, notInArray } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
+import { redirect, RedirectType } from "next/navigation"
 import { z } from "zod"
 
 import { getDesktopUrl } from "@/lib/daytona"
@@ -63,6 +64,101 @@ export async function createGroupChat(
   revalidatePath("/", "layout")
 
   return { success: true, chat }
+}
+
+type UpdateGroupChatResult =
+  { success: true; chat: Chat } | { success: false; error: string }
+
+export async function updateGroupChat(
+  chatId: string,
+  input: z.input<typeof insertGroupChatSchema>
+): Promise<UpdateGroupChatResult> {
+  const { userId } = await auth.protect()
+
+  const parsed = insertGroupChatSchema.safeParse(input)
+  if (!parsed.success) {
+    return { success: false, error: z.prettifyError(parsed.error) }
+  }
+  const { botIds, ...values } = parsed.data
+
+  // Bot IDs come from the browser, so only the user's own bots may join
+  const ownBots = await db
+    .select({ id: bots.id })
+    .from(bots)
+    .where(and(inArray(bots.id, botIds), eq(bots.userId, userId)))
+  if (ownBots.length !== new Set(botIds).size) {
+    return { success: false, error: "Some of those bots don't exist." }
+  }
+
+  const chat = await db.transaction(async (tx) => {
+    // Scoping by userId and kind means someone else's chat, or a direct
+    // chat, matches nothing
+    const [chat] = await tx
+      .update(chats)
+      .set({ ...values, name: values.name || null })
+      .where(
+        and(
+          eq(chats.id, chatId),
+          eq(chats.userId, userId),
+          eq(chats.kind, "group")
+        )
+      )
+      .returning()
+    if (!chat) return undefined
+
+    const memberIds = ownBots.map((bot) => bot.id)
+    await tx
+      .delete(chatMembers)
+      .where(
+        and(
+          eq(chatMembers.chatId, chat.id),
+          notInArray(chatMembers.botId, memberIds)
+        )
+      )
+    // Bots already in the group keep their place in the member order
+    await tx
+      .insert(chatMembers)
+      .values(memberIds.map((botId) => ({ chatId: chat.id, botId })))
+      .onConflictDoNothing()
+
+    return chat
+  })
+
+  if (!chat) {
+    return { success: false, error: "That group doesn't exist." }
+  }
+
+  revalidatePath("/", "layout")
+
+  return { success: true, chat }
+}
+
+type DeleteGroupChatResult = { success: false; error: string }
+
+export async function deleteGroupChat(
+  chatId: string
+): Promise<DeleteGroupChatResult> {
+  const { userId } = await auth.protect()
+
+  // Memberships cascade away; the bots themselves stay
+  const [chat] = await db
+    .delete(chats)
+    .where(
+      and(
+        eq(chats.id, chatId),
+        eq(chats.userId, userId),
+        eq(chats.kind, "group")
+      )
+    )
+    .returning()
+
+  if (!chat) {
+    return { success: false, error: "That group doesn't exist." }
+  }
+
+  revalidatePath("/", "layout")
+  // The chat the group was deleted from no longer exists
+  redirect("/", RedirectType.replace)
 }
 
 // chatId comes from the browser, so every action checks it belongs to the
