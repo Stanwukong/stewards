@@ -188,14 +188,26 @@ export async function mintChatAccessToken(chatId: string) {
 
 const load = chat.createLoadTranscriptAction(defaultStorage)
 
+// The screenshots a bot takes for itself are never shown, and they make up
+// most of a transcript, so they stay out of the page. The agent keeps its own
+// copy of the history.
+function withoutOwnScreenshots(message: BotChatUIMessage): BotChatUIMessage {
+  return {
+    ...message,
+    parts: message.parts.map((part) =>
+      part.type === "tool-viewScreen" && part.state === "output-available"
+        ? { ...part, output: { ...part.output, base64: "" } }
+        : part
+    ),
+  }
+}
+
 export async function loadTranscript(params: ChatLoadTranscriptParams) {
   await assertOwnsChat(params.chatId)
   const transcript = await load(params)
   // Storage is untyped, but everything in it was written by botChat
-  return {
-    ...transcript,
-    messages: transcript.messages as BotChatUIMessage[],
-  }
+  const messages = transcript.messages as BotChatUIMessage[]
+  return { ...transcript, messages: messages.map(withoutOwnScreenshots) }
 }
 
 // The desktop of a direct chat's bot, for the computer panel. Group chats

@@ -1,6 +1,7 @@
 import { cookies } from "next/headers"
 
 import { AppSidebar } from "@/components/app-sidebar"
+import { ChatSessionsProvider } from "@/components/chat-sessions"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { getBots, getChats } from "@/queries/bots"
 
@@ -21,7 +22,9 @@ export default async function DashboardLayout({
   return (
     <SidebarProvider defaultOpen={defaultOpen}>
       <AppSidebar chats={chats} bots={bots} />
-      <SidebarInset>{children}</SidebarInset>
+      <SidebarInset>
+        <ChatSessionsProvider>{children}</ChatSessionsProvider>
+      </SidebarInset>
     </SidebarProvider>
   )
 }

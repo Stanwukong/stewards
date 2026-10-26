@@ -2,9 +2,9 @@ import { createGoogle } from "@ai-sdk/google"
 import { DaytonaError } from "@daytona/sdk"
 import { chat } from "@trigger.dev/sdk/ai"
 import {
-  hasToolCall,
   isStepCount,
   type InferUITools,
+  type ModelMessage,
   type UIDataTypes,
   type UIMessage,
 } from "ai"
@@ -34,7 +34,7 @@ export type BotChatUIMessage = UIMessage<
 // GEMINI_API_KEY, the name Google's own tooling uses
 const google = createGoogle({ apiKey: process.env.GEMINI_API_KEY })
 
-type ChatBot = Pick<Bot, "id" | "name" | "job" | "instructions">
+type ChatBot = Pick<Bot, "id" | "name" | "job" | "instructions" | "sandboxId">
 type Member = Pick<Bot, "id" | "name" | "job">
 
 function groupSection(bot: ChatBot, members: Member[], handedOff: boolean) {
@@ -141,47 +141,90 @@ function chatErrorMessage(error: unknown) {
   return "Something went wrong on our side."
 }
 
+// Who is answering a chat's current turn. A handoff switches it partway
+// through, and the tools, the prompt and the message's author follow.
+type Turn = {
+  bot: ChatBot
+  kind: Chat["kind"]
+  members: ChatBot[]
+  handedOff: boolean
+}
+
+// Set when the turn's tools are resolved, which the runtime does before
+// onTurnStart and run()
+const turns = new Map<string, Turn>()
+
+function currentTurn(chatId: string) {
+  const turn = turns.get(chatId)
+  if (!turn) throw new Error("The turn started before its tools resolved")
+  return turn
+}
+
 // The bot answering this turn: the one tagged in the message, or the chat's
 // first bot when none was. The server actions have already checked the chat
 // belongs to the signed-in user, so this runs without Clerk. The tag comes
 // from the browser, so it only counts when that bot is a member of the chat.
-async function getChatContext(chatId: string, botId: string | undefined) {
-  const member = await db.query.chatMembers.findFirst({
-    where: (members, { and, eq }) =>
-      and(
-        eq(members.chatId, chatId),
-        botId ? eq(members.botId, botId) : undefined
-      ),
-    orderBy: (members, { asc }) => [asc(members.joinedAt)],
+async function getTurn(
+  chatId: string,
+  botId: string | undefined
+): Promise<Turn> {
+  const row = await db.query.chats.findFirst({
+    where: (chats, { eq }) => eq(chats.id, chatId),
+    columns: { kind: true },
     with: {
-      bot: {
-        columns: {
-          id: true,
-          name: true,
-          job: true,
-          instructions: true,
-          sandboxId: true,
-        },
-      },
-      chat: {
-        columns: { kind: true },
+      members: {
+        orderBy: (members, { asc }) => [asc(members.joinedAt)],
         with: {
-          members: {
-            orderBy: (members, { asc }) => [asc(members.joinedAt)],
-            with: { bot: { columns: { id: true, name: true, job: true } } },
+          bot: {
+            columns: {
+              id: true,
+              name: true,
+              job: true,
+              instructions: true,
+              sandboxId: true,
+            },
           },
         },
       },
     },
   })
-  if (!member) throw new Error("Chat not found")
+  const members = row?.members.map((member) => member.bot) ?? []
+  const bot = botId ? members.find((member) => member.id === botId) : members[0]
+  if (!row || !bot) throw new Error("Chat not found")
 
-  const { bot, chat } = member
-  return {
-    bot,
-    kind: chat.kind,
-    members: chat.members.map((member) => member.bot),
-  }
+  return { bot, kind: row.kind, members, handedOff: false }
+}
+
+// Screenshots are big, and each one stays in the history the model is sent on
+// every later step and turn. Only the latest few are worth seeing again.
+const SCREENSHOTS_KEPT = 2
+
+function dropOldScreenshots(messages: ModelMessage[]) {
+  let kept = 0
+  return messages
+    .slice()
+    .reverse()
+    .map((message) => {
+      if (message.role !== "tool") return message
+      return {
+        ...message,
+        content: message.content.map((part) => {
+          if (part.type !== "tool-result" || part.output.type !== "content") {
+            return part
+          }
+          if (kept++ < SCREENSHOTS_KEPT) return part
+          return {
+            ...part,
+            output: {
+              type: "text" as const,
+              value:
+                "This screenshot is no longer kept. Use viewScreen to look again.",
+            },
+          }
+        }),
+      }
+    })
+    .reverse()
 }
 
 // Conversations persist in the default transcript storage, keyed by chatId
@@ -191,60 +234,86 @@ export const botChat = chat
     schema: z.object({
       // Which bot the message is for, sent with every message
       botId: z.string().optional(),
-      // Set when another bot handed the message to this one
-      handoff: z.boolean().optional(),
     }),
   })
   .agent({
     id: "bot-chat",
-    // Each turn's tools work the computer that belongs to the answering bot
+    // Each turn's tools work the computer of whichever bot is answering
     tools: async ({ chatId, clientData }) => {
-      const { bot, kind, members } = await getChatContext(
-        chatId,
-        clientData?.botId
-      )
-      const computer = createComputerTools(bot.sandboxId)
-      // A bot that was handed the message can't pass it on, so it can never
-      // bounce between two bots
-      const others = members.filter((member) => member.id !== bot.id)
-      if (kind === "direct" || clientData?.handoff || others.length === 0) {
-        return computer
-      }
-      return { ...computer, ...createHandoffTool(others) }
+      const turn = await getTurn(chatId, clientData?.botId)
+      turns.set(chatId, turn)
+      const computer = createComputerTools(() => turn.bot.sandboxId)
+      const others = turn.members.filter((member) => member.id !== turn.bot.id)
+      if (turn.kind === "direct" || others.length === 0) return computer
+      return { ...computer, ...createHandoffTool(turn.bot, others) }
     },
-    // The browser sends this once a handoff call finishes, with the bot it
-    // went to as clientData, so that bot answers the history as it stands
-    actionSchema: z.object({ type: z.literal("handoff") }),
-    onAction: () => chat.turn(),
     // Rebuilt every turn, including continuation runs, so edits to the bot and
     // switching bots apply from the next message
-    onTurnStart: async ({ chatId, clientData }) => {
-      const { bot, kind, members } = await getChatContext(
-        chatId,
-        clientData?.botId
-      )
+    onTurnStart: async ({ chatId }) => {
+      const turn = currentTurn(chatId)
       chat.prompt.set(
-        systemPromptFor(bot, kind, members, clientData?.handoff ?? false)
+        systemPromptFor(turn.bot, turn.kind, turn.members, turn.handedOff)
       )
       chat.setUIMessageStreamOptions({
+        // Sent again at every step, so after a handoff the message is
+        // credited to the bot that took it over
         messageMetadata: ({ part }) =>
-          part.type === "start" ? { botId: bot.id } : undefined,
+          part.type === "start" ||
+          part.type === "start-step" ||
+          part.type === "finish"
+            ? { botId: turn.bot.id }
+            : undefined,
         onError: chatErrorMessage,
       })
     },
-    run: async ({ messages, tools, signal, streamText }) => {
+    run: async ({ chatId, messages, tools, signal, streamText }) => {
+      const turn = currentTurn(chatId)
+
       return streamText({
         // Gemini 3.x rejects sampling settings (temperature, topP, topK), so
         // leave them unset. Thinking runs at the default "medium" level.
         model: google("gemini-3.8-flash"),
         messages,
         tools,
-        stopWhen: [
-          // Working a desktop takes many look-act-look steps
-          isStepCount(50),
-          // The bot it was handed to takes it from here
-          hasToolCall("handoff"),
-        ],
+        // Working a desktop takes many look-act-look steps
+        stopWhen: isStepCount(50),
+        // A handoff hands the rest of the turn to the bot it went to, here on
+        // the server, so it goes through even when nobody is watching the chat
+        prepareStep: ({ steps, messages }) => {
+          const handoff = turn.handedOff
+            ? undefined
+            : steps
+                .at(-1)
+                ?.toolResults.find((result) => result.toolName === "handoff")
+          const target =
+            handoff &&
+            turn.members.find(
+              (member) =>
+                member.id === (handoff.output as { botId: string }).botId
+            )
+          if (target) {
+            turn.bot = target
+            turn.handedOff = true
+          }
+
+          return {
+            messages: dropOldScreenshots(messages),
+            ...(target && {
+              instructions: systemPromptFor(
+                target,
+                turn.kind,
+                turn.members,
+                true
+              ),
+            }),
+            // The bot it went to can't pass it on, so it never bounces
+            ...(turn.handedOff && {
+              activeTools: Object.keys(tools).filter(
+                (name) => name !== "handoff"
+              ) as (keyof typeof tools)[],
+            }),
+          }
+        },
         abortSignal: signal,
       })
     },

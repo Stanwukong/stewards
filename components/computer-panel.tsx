@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/empty"
 import { ResizableHandle, ResizablePanel } from "@/components/ui/resizable"
 import { Spinner } from "@/components/ui/spinner"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 
 type Desktop = Awaited<ReturnType<typeof getComputerUrl>>
@@ -42,6 +43,9 @@ type ComputerPanelContextValue = {
   screen: Screen
   load: () => void
   setPanelSlot: (element: HTMLDivElement | null) => void
+  // Phones have no room beside the chat, so the computer opens fullscreen
+  isMobile: boolean
+  openFullscreen: () => void
 }
 
 const ComputerPanelContext =
@@ -65,6 +69,7 @@ export function ComputerPanelProvider({
   children: React.ReactNode
 }) {
   const panelRef = usePanelRef()
+  const isMobile = useIsMobile()
   const [open, setOpen] = React.useState(false)
   const [fullscreen, setFullscreen] = React.useState(false)
   const [screen, setScreen] = React.useState<Screen>({ status: "idle" })
@@ -87,6 +92,11 @@ export function ComputerPanelProvider({
     if (next && screen.status === "idle") load()
   }
 
+  const openFullscreen = () => {
+    setFullscreen(true)
+    if (screen.status === "idle") load()
+  }
+
   return (
     <ComputerPanelContext
       value={{
@@ -96,6 +106,8 @@ export function ComputerPanelProvider({
         screen,
         load,
         setPanelSlot,
+        isMobile,
+        openFullscreen,
       }}
     >
       <Dialog
@@ -125,8 +137,27 @@ export function ComputerPanelProvider({
           </DialogHeader>
           <div
             ref={setDialogSlot}
-            className="min-h-0 flex-1 overflow-hidden rounded-lg bg-muted"
-          />
+            className="relative min-h-0 flex-1 overflow-hidden rounded-lg bg-muted"
+          >
+            {/* Phones open the computer here before it has started */}
+            {screen.status !== "ready" && (
+              <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                {screen.status === "error" ? (
+                  <>
+                    Couldn&apos;t reach the computer.
+                    <Button variant="outline" size="sm" onClick={load}>
+                      Try again
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Spinner />
+                    Starting computer…
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </ComputerPanelContext>
@@ -227,8 +258,10 @@ function ComputerScreen({
 }
 
 export function ComputerPanel() {
-  const { panelRef, open, setOpen, screen, load, setPanelSlot } =
+  const { panelRef, open, setOpen, screen, load, setPanelSlot, isMobile } =
     useComputerPanel()
+
+  if (isMobile) return null
 
   return (
     <>
@@ -290,7 +323,7 @@ export function ComputerPanel() {
 }
 
 export function ComputerPanelToggle() {
-  const { panelRef, open } = useComputerPanel()
+  const { panelRef, open, isMobile, openFullscreen } = useComputerPanel()
 
   return (
     <Button
@@ -298,9 +331,11 @@ export function ComputerPanelToggle() {
       size="icon-sm"
       className="ml-auto"
       aria-pressed={open}
-      onClick={() =>
-        open ? panelRef.current?.collapse() : panelRef.current?.expand()
-      }
+      onClick={() => {
+        if (isMobile) openFullscreen()
+        else if (open) panelRef.current?.collapse()
+        else panelRef.current?.expand()
+      }}
     >
       <MonitorIcon />
       <span className="sr-only">

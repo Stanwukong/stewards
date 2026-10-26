@@ -48,17 +48,23 @@ const coordinates = {
 }
 
 // The tools a bot uses to work its own computer, a Daytona sandbox with a
-// Linux desktop. Each turn gets a fresh set bound to the bot's sandbox.
-export function createComputerTools(sandboxId: string) {
+// Linux desktop. Each turn gets a fresh set, which asks for the sandbox on
+// every call: a handoff moves the rest of the turn to another bot's computer.
+export function createComputerTools(sandboxId: () => string) {
   // Looked up on first use, so a turn that never touches the computer never
   // wakes the sandbox
-  let running: Promise<Sandbox> | undefined
+  const running = new Map<string, Promise<Sandbox>>()
   function sandbox() {
-    running ??= getRunningSandbox(sandboxId).catch((error) => {
-      running = undefined
-      throw error
-    })
-    return running
+    const id = sandboxId()
+    let box = running.get(id)
+    if (!box) {
+      box = getRunningSandbox(id).catch((error) => {
+        running.delete(id)
+        throw error
+      })
+      running.set(id, box)
+    }
+    return box
   }
 
   async function desktop() {
@@ -330,8 +336,11 @@ export function createComputerTools(sandboxId: string) {
 export type ComputerTools = ReturnType<typeof createComputerTools>
 
 // Passes the person's message to another bot in a group chat, which answers
-// it right after. Calling it ends the turn of the bot that called it.
-export function createHandoffTool(others: { id: string; name: string }[]) {
+// it right after, in the same turn
+export function createHandoffTool(
+  from: { name: string },
+  others: { id: string; name: string }[]
+) {
   return {
     handoff: tool({
       description:
@@ -347,6 +356,7 @@ export function createHandoffTool(others: { id: string; name: string }[]) {
           ),
       }),
       outputSchema: z.object({
+        from: z.string(),
         botId: z.string(),
         name: z.string(),
         reason: z.string(),
@@ -358,7 +368,7 @@ export function createHandoffTool(others: { id: string; name: string }[]) {
             `No other bot in this chat has the ID ${botId}. Pick one from the members list.`
           )
         }
-        return { botId: bot.id, name: bot.name, reason }
+        return { from: from.name, botId: bot.id, name: bot.name, reason }
       },
     }),
   } satisfies ToolSet

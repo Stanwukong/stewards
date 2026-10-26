@@ -1,9 +1,7 @@
 "use client"
 
 import { useChat } from "@ai-sdk/react"
-import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
-import { useTriggerChatTransport } from "@trigger.dev/sdk/chat/react"
-import { readUIMessageStream, type ChatStatus } from "ai"
+import { type ChatStatus } from "ai"
 import {
   ArrowRightLeftIcon,
   BrainIcon,
@@ -20,6 +18,7 @@ import {
   ScrollIcon,
 } from "lucide-react"
 import {
+  use,
   useId,
   useRef,
   useState,
@@ -28,7 +27,6 @@ import {
 } from "react"
 import { bundledLanguages, type BundledLanguage } from "shiki"
 
-import { mintChatAccessToken, startChatSession } from "@/actions/chats"
 import {
   Attachment,
   AttachmentPreview,
@@ -64,6 +62,7 @@ import {
 import { Terminal } from "@/components/ai-elements/terminal"
 import { BotBadge } from "@/components/bot-badge"
 import { ChatAvatar } from "@/components/chat-avatar"
+import { useChatSessions, type ChatHistory } from "@/components/chat-sessions"
 import {
   Tool,
   ToolContent,
@@ -75,7 +74,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { toast } from "@/components/ui/toast"
 import { findMentions, MENTION_QUERY } from "@/lib/mentions"
-import type { BotChatUIMessage, botChat } from "@/trigger/chat"
+import type { BotChatUIMessage } from "@/trigger/chat"
 
 type Part = BotChatUIMessage["parts"][number]
 type ToolPart = Extract<Part, { type: `tool-${string}` }>
@@ -346,7 +345,7 @@ function ToolCall({ part }: { part: ToolPart }) {
       return (
         <ActionRow part={part} icon={<ArrowRightLeftIcon />}>
           {part.state === "output-available"
-            ? `Handed over to ${part.output.name}: ${part.output.reason}`
+            ? `${part.output.from} handed this to ${part.output.name}: ${part.output.reason}`
             : "Handing over"}
         </ActionRow>
       )
@@ -361,10 +360,6 @@ const MAX_ATTACHMENTS_SIZE = 700 * 1024
 const ACCEPTED_FILES = "image/*,application/pdf"
 
 type ChatBot = { id: string; name: string; avatar: string; job: string }
-
-function isHandoff(part: Part): part is ToolPartOf<"tool-handoff"> {
-  return part.type === "tool-handoff"
-}
 
 function ComposerAttachments() {
   const attachments = usePromptInputAttachments()
@@ -610,98 +605,53 @@ function Composer({
   )
 }
 
-// A chat with history starts from its existing session, so the transport can
-// resume an answer that was still streaming when the page loaded
+// The conversation while a chat's history is on its way, which only a chat
+// opened for the first time in this tab waits for
+export function ChatSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-end gap-6 p-4">
+        <Skeleton className="ml-auto h-10 w-2/5 rounded-xl" />
+        <div className="space-y-2">
+          <Skeleton className="h-4 w-4/5" />
+          <Skeleton className="h-4 w-3/5" />
+          <Skeleton className="h-4 w-2/3" />
+        </div>
+      </div>
+      <div className="mx-auto w-full max-w-3xl p-4 pt-0">
+        <Skeleton className="h-28 w-full rounded-xl" />
+      </div>
+    </div>
+  )
+}
+
 export function Chat({
   id,
   bots,
   group,
-  initialMessages,
-  session,
+  history,
 }: {
   id: string
   // The chat's bots, in the order they joined
   bots: ChatBot[]
   group: boolean
-  initialMessages: BotChatUIMessage[]
-  session?: ChatSessionPersistedState
+  history: Promise<ChatHistory>
 }) {
-  const transport = useTriggerChatTransport<typeof botChat>({
-    task: "bot-chat",
-    accessToken: ({ chatId }) => mintChatAccessToken(chatId),
-    startSession: ({ chatId, clientData }) =>
-      startChatSession({ chatId, clientData }),
-    sessions: session && { [id]: session },
+  const sessions = useChatSessions()
+  // A chat opened before in this tab carries on from where it is, still
+  // streaming if a bot is working, so only a first visit waits for history
+  const chat = sessions.find(id) ?? sessions.open(id, use(history))
+
+  const { messages, sendMessage, status } = useChat<BotChatUIMessage>({
+    chat,
+    resume: chat.messages.length > 0,
   })
-
-  const {
-    messages,
-    setMessages,
-    sendMessage,
-    status,
-    stop: stopStream,
-  } = useChat<BotChatUIMessage>({
-    id,
-    messages: initialMessages,
-    transport,
-    resume: initialMessages.length > 0,
-    // A bot that handed the message over has finished, so the bot it went to
-    // answers now
-    onFinish: ({ message, isAbort, isError }) => {
-      if (isAbort || isError) return
-      const handoff = message.parts.findLast(isHandoff)
-      if (handoff?.state === "output-available") {
-        void followHandoff(handoff.output.botId)
-      }
-    },
-  })
-
-  // Whether the bot handed a message is answering
-  const [handingOff, setHandingOff] = useState(false)
-
-  // The answer comes from an action, since the person sent nothing new.
-  // Through useChat it would be folded into the handoff message, so its stream
-  // is read into a message of its own here instead.
-  async function followHandoff(botId: string) {
-    setHandingOff(true)
-    try {
-      const stream = await transport.sendAction(
-        id,
-        { type: "handoff" },
-        { metadata: { botId, handoff: true } }
-      )
-      for await (const message of readUIMessageStream<BotChatUIMessage>({
-        stream,
-      })) {
-        setMessages((current) =>
-          current.at(-1)?.id === message.id
-            ? [...current.slice(0, -1), message]
-            : [...current, message]
-        )
-      }
-    } catch (error) {
-      console.error("Handoff failed", error)
-      toast.add({
-        title: "Couldn't hand the message over",
-        description: "Tag the bot and send it again.",
-        type: "error",
-      })
-    } finally {
-      setHandingOff(false)
-    }
-  }
 
   // Carry on with whoever was talked to last. That bot may have left the chat
   // since, so fall back to the first.
   const lastBotId = messages.findLast((message) => message.metadata?.botId)
     ?.metadata?.botId
   const defaultBot = bots.find((bot) => bot.id === lastBotId) ?? bots[0]
-
-  // Aborting a resumed stream doesn't reach the agent, so stop it directly too
-  function stop() {
-    stopStream()
-    transport.stopGeneration(id)
-  }
 
   function send({ text, files }: PromptInputMessage, botId: string) {
     if (!text.trim() && files.length === 0) return
@@ -789,8 +739,8 @@ export function Chat({
           <Composer
             bots={bots}
             defaultBot={defaultBot}
-            status={handingOff ? "streaming" : status}
-            onStop={stop}
+            status={status}
+            onStop={() => sessions.stop(id)}
             onSend={send}
           />
         </PromptInputProvider>

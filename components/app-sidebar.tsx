@@ -39,6 +39,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar"
 import { Wordmark } from "@/components/wordmark"
 import type { BotListItem, ChatListItem } from "@/queries/bots"
@@ -55,6 +56,7 @@ export function AppSidebar({
   const [searchOpen, setSearchOpen] = React.useState(false)
   const pathname = usePathname()
   const router = useRouter()
+  const { setOpenMobile } = useSidebar()
   const activeChatRef = React.useRef<HTMLAnchorElement>(null)
   const previousPathnameRef = React.useRef(pathname)
 
@@ -69,6 +71,12 @@ export function AppSidebar({
     link.scrollIntoView({ block: "nearest" })
     if (navigated) link.focus({ preventScroll: true })
   }, [pathname])
+
+  // On phones the sidebar covers the page, so get out of the way once a chat
+  // is picked
+  React.useEffect(() => {
+    setOpenMobile(false)
+  }, [pathname, setOpenMobile])
 
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {

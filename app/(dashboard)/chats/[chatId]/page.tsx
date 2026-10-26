@@ -1,8 +1,10 @@
 import { notFound } from "next/navigation"
+import { Suspense } from "react"
 
 import { loadTranscript, mintChatAccessToken } from "@/actions/chats"
-import { Chat } from "@/components/chat"
+import { Chat, ChatSkeleton } from "@/components/chat"
 import { ChatHeader } from "@/components/chat-header"
+import type { ChatHistory } from "@/components/chat-sessions"
 import {
   ComputerPanel,
   ComputerPanelProvider,
@@ -11,34 +13,42 @@ import { ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { getBots } from "@/queries/bots"
 import { getChat } from "@/queries/chats"
 
+// A chat with history already has a session; hydrate it so the transport can
+// reconnect past what was saved instead of starting a new one
+async function loadHistory(chatId: string): Promise<ChatHistory> {
+  const [{ messages, cursors }, publicAccessToken] = await Promise.all([
+    loadTranscript({ chatId }),
+    mintChatAccessToken(chatId),
+  ])
+  if (messages.length === 0) return { messages }
+  return {
+    messages,
+    session: { publicAccessToken, lastEventId: cursors?.lastOutEventId },
+  }
+}
+
 export default async function Page(props: PageProps<"/chats/[chatId]">) {
   const { chatId } = await props.params
   const [chat, bots] = await Promise.all([getChat(chatId), getBots()])
 
   if (!chat) notFound()
 
-  const { messages, cursors } = await loadTranscript({ chatId })
-  // A chat with history already has a session; hydrate it so the transport
-  // can reconnect past what was saved instead of starting a new one
-  const session =
-    messages.length > 0
-      ? {
-          publicAccessToken: await mintChatAccessToken(chatId),
-          lastEventId: cursors?.lastOutEventId,
-        }
-      : undefined
+  // Not awaited: a chat already open in this tab shows what it has straight
+  // away, and only one opened for the first time waits for its history
+  const history = loadHistory(chatId)
 
   const conversation = (
     <div className="flex h-full flex-col">
       <ChatHeader chat={chat} bots={bots} />
-      <Chat
-        key={chat.id}
-        id={chat.id}
-        bots={chat.bots}
-        group={chat.kind === "group"}
-        initialMessages={messages}
-        session={session}
-      />
+      <Suspense fallback={<ChatSkeleton />}>
+        <Chat
+          key={chat.id}
+          id={chat.id}
+          bots={chat.bots}
+          group={chat.kind === "group"}
+          history={history}
+        />
+      </Suspense>
     </div>
   )
 

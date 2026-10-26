@@ -3,6 +3,7 @@ import { ComputerPanelToggle } from "@/components/computer-panel"
 import { GroupChatAvatar } from "@/components/group-chat-avatar"
 import { GroupChatDialog } from "@/components/group-chat-dialog"
 import { Button } from "@/components/ui/button"
+import { SidebarTrigger } from "@/components/ui/sidebar"
 import type { BotListItem } from "@/queries/bots"
 import type { ChatWithBots } from "@/queries/chats"
 
@@ -28,6 +29,8 @@ export function ChatHeader({
 
   return (
     <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 bg-background px-4">
+      {/* On phones the sidebar is a sheet, and this is the only way to open it */}
+      <SidebarTrigger className="-ml-1 md:hidden" />
       {chat.kind === "direct" ? (
         <>
           <BotDialog bot={chat.bots[0]} trigger={trigger} />
