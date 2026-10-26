@@ -44,6 +44,11 @@ import {
 } from "@/components/ai-elements/conversation"
 import { Image } from "@/components/ai-elements/image"
 import {
+  Reasoning,
+  ReasoningContent,
+  ReasoningTrigger,
+} from "@/components/ai-elements/reasoning"
+import {
   Message,
   MessageContent,
   MessageResponse,
@@ -144,7 +149,8 @@ function BashCall({ part }: { part: ToolPartOf<"tool-bash"> }) {
       <ToolHeader
         type={part.type}
         state={part.state}
-        title={command || "Running a command"}
+        // Commands often span lines; the full one is in the terminal below
+        title={command.replace(/\s+/g, " ").trim() || "Running a command"}
       />
       <ToolContent>
         <Terminal
@@ -778,6 +784,19 @@ export function Chat({
                         />
                       ) : (
                         <MessageResponse key={i}>{part.text}</MessageResponse>
+                      )
+                    }
+                    // Summaries of the model's thinking. Some carry only a
+                    // signature for the model and no text.
+                    if (part.type === "reasoning" && part.text.trim()) {
+                      return (
+                        <Reasoning
+                          key={i}
+                          isStreaming={part.state === "streaming"}
+                        >
+                          <ReasoningTrigger />
+                          <ReasoningContent>{part.text}</ReasoningContent>
+                        </Reasoning>
                       )
                     }
                     if (isToolPart(part)) {

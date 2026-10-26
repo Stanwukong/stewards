@@ -1,5 +1,6 @@
 import { createGoogle } from "@ai-sdk/google"
 import { DaytonaError } from "@daytona/sdk"
+import { deployments } from "@trigger.dev/sdk"
 import { chat } from "@trigger.dev/sdk/ai"
 import {
   APICallError,
@@ -294,7 +295,22 @@ export const botChat = chat
     },
     // Rebuilt every turn, including continuation runs, so edits to the bot and
     // switching bots apply from the next message
-    onTurnStart: async ({ chatId }) => {
+    onTurnStart: async ({ chatId, ctx }) => {
+      // A run keeps the code it started on, and a chat in use keeps its run
+      // alive, so a deploy would otherwise never reach it. Hand the message to
+      // a run on the newest deploy instead of answering it here.
+      // Local dev runs the code as it's saved, so only deploys need this
+      if (ctx.environment.type !== "DEVELOPMENT" && ctx.run.version) {
+        const current = await deployments.retrieveCurrent().catch((error) => {
+          console.warn("Couldn't check for a newer deploy", error)
+          return undefined
+        })
+        if (current && current.version !== ctx.run.version) {
+          chat.requestUpgrade()
+          return
+        }
+      }
+
       const turn = currentTurn(chatId)
       chat.prompt.set(
         systemPromptFor(turn.bot, turn.kind, turn.members, turn.handedOff)
@@ -320,6 +336,11 @@ export const botChat = chat
         tools,
         // Working a desktop takes many look-act-look steps
         stopWhen: isStepCount(50),
+        // Stream summaries of the model's thinking, so the person sees it
+        // working through the long gaps between its actions
+        providerOptions: {
+          google: { thinkingConfig: { includeThoughts: true } },
+        },
         // A handoff hands the rest of the turn to the bot it went to, here on
         // the server, so it goes through even when nobody is watching the chat
         prepareStep: ({ steps, messages }) => {
