@@ -2,7 +2,10 @@ import { createGoogle } from "@ai-sdk/google"
 import { DaytonaError } from "@daytona/sdk"
 import { chat } from "@trigger.dev/sdk/ai"
 import {
+  APICallError,
   isStepCount,
+  RetryError,
+  wrapLanguageModel,
   type InferUITools,
   type ModelMessage,
   type UIDataTypes,
@@ -33,6 +36,42 @@ export type BotChatUIMessage = UIMessage<
 // The provider reads GOOGLE_GENERATIVE_AI_API_KEY by default; the key lives in
 // GEMINI_API_KEY, the name Google's own tooling uses
 const google = createGoogle({ apiKey: process.env.GEMINI_API_KEY })
+
+// Tried in order. Each is a separate deployment at Google, so when one is
+// overloaded, rate limited or down, the next one usually isn't.
+const MODELS = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"]
+
+// Only worth moving on when the model is the problem. A bad request fails the
+// same way on every model, so it surfaces straight away.
+function isUnavailable(error: unknown) {
+  return (
+    APICallError.isInstance(error) &&
+    (error.isRetryable || error.statusCode === 404)
+  )
+}
+
+// Gemini 3.x rejects sampling settings (temperature, topP, topK), so leave
+// them unset. Thinking runs at the default "medium" level.
+const model = wrapLanguageModel({
+  model: google(MODELS[0]),
+  middleware: {
+    // A busy model refuses before streaming anything, so the whole call can
+    // move to the next one
+    wrapStream: async ({ doStream, params }) => {
+      let lastError: unknown
+      for (const [i, id] of MODELS.entries()) {
+        try {
+          return i === 0 ? await doStream() : await google(id).doStream(params)
+        } catch (error) {
+          if (!isUnavailable(error)) throw error
+          console.warn(`${id} is unavailable, trying the next model`, error)
+          lastError = error
+        }
+      }
+      throw lastError
+    },
+  },
+})
 
 type ChatBot = Pick<Bot, "id" | "name" | "job" | "instructions" | "sandboxId">
 type Member = Pick<Bot, "id" | "name" | "job">
@@ -132,10 +171,16 @@ ${bot.instructions}`,
 // into "An error occurred.", so on later turns the bot no longer sees why a
 // tool failed. Messages written for the bot, and Daytona's errors about its
 // own computer, are kept; anything else could carry internals (connection
-// strings, API responses, stack traces), so it stays generic.
+// strings, API responses, stack traces), so it stays generic. Every model being
+// overloaded or rate limited is worth naming, since trying again fixes it.
 function chatErrorMessage(error: unknown) {
   if (error instanceof ToolError || error instanceof DaytonaError) {
     return error.message
+  }
+  const cause = RetryError.isInstance(error) ? error.lastError : error
+  if (APICallError.isInstance(cause) && cause.isRetryable) {
+    console.error(error)
+    return "Every model is too busy to answer right now. Try again in a moment."
   }
   console.error(error)
   return "Something went wrong on our side."
@@ -270,9 +315,7 @@ export const botChat = chat
       const turn = currentTurn(chatId)
 
       return streamText({
-        // Gemini 3.x rejects sampling settings (temperature, topP, topK), so
-        // leave them unset. Thinking runs at the default "medium" level.
-        model: google("gemini-3.8-flash"),
+        model,
         messages,
         tools,
         // Working a desktop takes many look-act-look steps

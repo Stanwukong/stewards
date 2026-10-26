@@ -6,6 +6,7 @@ import {
   ArrowRightLeftIcon,
   BrainIcon,
   CircleAlertIcon,
+  ClockAlertIcon,
   EyeIcon,
   FileIcon,
   FolderIcon,
@@ -15,10 +16,12 @@ import {
   MousePointer2Icon,
   MousePointerClickIcon,
   PaperclipIcon,
+  RotateCcwIcon,
   ScrollIcon,
 } from "lucide-react"
 import {
   use,
+  useEffect,
   useId,
   useRef,
   useState,
@@ -63,6 +66,14 @@ import { Terminal } from "@/components/ai-elements/terminal"
 import { BotBadge } from "@/components/bot-badge"
 import { ChatAvatar } from "@/components/chat-avatar"
 import { useChatSessions, type ChatHistory } from "@/components/chat-sessions"
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { WorkingIndicator } from "@/components/working-indicator"
 import {
   Tool,
   ToolContent,
@@ -356,6 +367,14 @@ function ToolCall({ part }: { part: ToolPart }) {
 // travel inside it as base64, which is a third bigger than the file itself
 const MAX_ATTACHMENTS_SIZE = 700 * 1024
 
+// How long a reply can go quiet before the person is told it may have
+// stalled. A running tool can take a while on its own (bash waits up to 10
+// minutes), and a message with no reply at all should have been picked up by
+// a resume well within a few seconds of the chat opening.
+const QUIET_LIMIT = 90_000
+const TOOL_LIMIT = 11 * 60_000
+const UNANSWERED_LIMIT = 5_000
+
 // Files the model can read
 const ACCEPTED_FILES = "image/*,application/pdf"
 
@@ -642,16 +661,55 @@ export function Chat({
   // streaming if a bot is working, so only a first visit waits for history
   const chat = sessions.find(id) ?? sessions.open(id, use(history))
 
-  const { messages, sendMessage, status } = useChat<BotChatUIMessage>({
-    chat,
-    resume: chat.messages.length > 0,
-  })
+  const { messages, sendMessage, regenerate, status, error } =
+    useChat<BotChatUIMessage>({
+      chat,
+      resume: chat.messages.length > 0,
+    })
 
   // Carry on with whoever was talked to last. That bot may have left the chat
   // since, so fall back to the first.
   const lastBotId = messages.findLast((message) => message.metadata?.botId)
     ?.metadata?.botId
   const defaultBot = bots.find((bot) => bot.id === lastBotId) ?? bots[0]
+  // The bot the latest message went to, which a retry goes to again
+  const askedId = messages.findLast((message) => message.role === "user")
+    ?.metadata?.botId
+  const asked = bots.find((bot) => bot.id === askedId) ?? defaultBot
+
+  const busy = status === "submitted" || status === "streaming"
+  const last = messages.at(-1)
+  const lastPart = last?.role === "assistant" ? last.parts.at(-1) : undefined
+  const toolRunning =
+    lastPart !== undefined && isToolPart(lastPart) && isRunning(lastPart)
+  // A message nobody is answering, as when the bot's run died before it could
+  const unanswered = status === "ready" && last?.role === "user"
+
+  // The chat as it was when it went quiet for too long. It counts as stalled
+  // until anything arrives or the status moves on.
+  const [quiet, setQuiet] = useState<{
+    messages: BotChatUIMessage[]
+    status: typeof status
+  } | null>(null)
+  useEffect(() => {
+    if (!busy && !unanswered) return
+    const limit = unanswered
+      ? UNANSWERED_LIMIT
+      : toolRunning
+        ? TOOL_LIMIT
+        : QUIET_LIMIT
+    const timer = setTimeout(() => setQuiet({ messages, status }), limit)
+    return () => clearTimeout(timer)
+  }, [busy, unanswered, toolRunning, messages, status])
+  const stalled =
+    (busy || unanswered) &&
+    quiet?.messages === messages &&
+    quiet.status === status
+
+  async function retry() {
+    if (busy) await sessions.stop(id)
+    await regenerate({ metadata: { botId: asked.id } })
+  }
 
   function send({ text, files }: PromptInputMessage, botId: string) {
     if (!text.trim() && files.length === 0) return
@@ -731,6 +789,43 @@ export function Chat({
               </Message>
             )
           })}
+          {busy && !stalled && <WorkingIndicator className="my-1" />}
+          {status === "error" && (
+            <Alert variant="destructive">
+              <CircleAlertIcon />
+              <AlertTitle>{asked.name} couldn&apos;t answer</AlertTitle>
+              <AlertDescription>
+                {error?.message || "Something went wrong."}
+              </AlertDescription>
+              <AlertAction>
+                <Button size="sm" variant="outline" onClick={retry}>
+                  <RotateCcwIcon data-icon="inline-start" />
+                  Retry
+                </Button>
+              </AlertAction>
+            </Alert>
+          )}
+          {stalled && (
+            <Alert>
+              <ClockAlertIcon />
+              <AlertTitle>
+                {busy
+                  ? `No word from ${asked.name} in a while`
+                  : `${asked.name} didn't reply`}
+              </AlertTitle>
+              <AlertDescription>
+                {busy
+                  ? "It may have stalled. Keep waiting, or stop it and try again."
+                  : "Something went wrong before it could answer."}
+              </AlertDescription>
+              <AlertAction>
+                <Button size="sm" variant="outline" onClick={retry}>
+                  <RotateCcwIcon data-icon="inline-start" />
+                  Retry
+                </Button>
+              </AlertAction>
+            </Alert>
+          )}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>
@@ -739,8 +834,10 @@ export function Chat({
           <Composer
             bots={bots}
             defaultBot={defaultBot}
-            status={status}
-            onStop={() => sessions.stop(id)}
+            // The error is shown in the conversation, so the button goes back
+            // to sending
+            status={status === "error" ? "ready" : status}
+            onStop={() => void sessions.stop(id)}
             onSend={send}
           />
         </PromptInputProvider>

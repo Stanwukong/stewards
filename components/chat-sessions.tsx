@@ -20,7 +20,7 @@ type ChatSessions = {
   // The chat as this tab last left it, if it has been opened before
   find: (id: string) => Chat<BotChatUIMessage> | undefined
   open: (id: string, history: ChatHistory) => Chat<BotChatUIMessage>
-  stop: (id: string) => void
+  stop: (id: string) => Promise<void>
 }
 
 const ChatSessionsContext = React.createContext<ChatSessions | null>(null)
@@ -66,9 +66,8 @@ export function ChatSessionsProvider({
     },
     // Aborting a resumed stream doesn't reach the agent, so stop it directly
     // too
-    stop: (id) => {
-      void chats.get(id)?.stop()
-      void transport.stopGeneration(id)
+    stop: async (id) => {
+      await Promise.all([chats.get(id)?.stop(), transport.stopGeneration(id)])
     },
   }
 
